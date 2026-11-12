@@ -1,0 +1,9 @@
+# created on the Jetson; too large or machine-specific for git
+.venv/
+.venv-quant/
+outputs/
+third_party/
+results/
+config.local.env
+__pycache__/
+*.pyc

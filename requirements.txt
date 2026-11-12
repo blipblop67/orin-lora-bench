@@ -1,0 +1,13 @@
+# Installed by scripts/00_setup.sh. torch and bitsandbytes come from the Jetson AI Lab
+# index (jp6/cu126) so they carry sm_87 kernels; everything else is pure Python from PyPI.
+numpy<2
+transformers>=4.45
+peft>=0.13
+accelerate>=1.0
+datasets>=3.0
+huggingface_hub>=0.25
+sentencepiece
+protobuf
+safetensors
+requests
+matplotlib
