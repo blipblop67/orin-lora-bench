@@ -11,6 +11,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.ticker  # noqa: E402,F401  (PercentFormatter)
 
 QUANT_ORDER = ["F16", "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_0"]
 
@@ -50,6 +51,146 @@ def qkey(q):
     return QUANT_ORDER.index(q) if q in QUANT_ORDER else 99
 
 
+# Summary chart colours: slots 1-2 of a CVD-validated categorical palette, plus neutral chart chrome.
+RUNTIME_COLOR = {"llama.cpp": "#2a78d6", "vllm": "#eb6834"}
+SURFACE, INK, INK2, MUTED, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
+
+
+def summary_points(R, sizes):
+    """One point per deployable variant: single-stream decode speed vs execution accuracy.
+
+    Untuned baselines have no serve record and come back separately as a reference band.
+    'ft-X (merged)' rows (llama.cpp lora part) re-measure the same file as 'ft-X', so they are dropped.
+    """
+    serve1 = {(r["runtime"], r["variant"]): r for r in latest(R["lcpp_serve"] + R["vllm_serve"],
+                                                             ["runtime", "variant", "concurrency"])
+              if r.get("status") == "ok" and r.get("concurrency") == 1}
+    evals = latest(R["lcpp_eval"] + R["vllm_eval"], ["runtime", "variant"])
+    names = {v for _, v in serve1}
+    pts, base = [], []
+    for e in evals:
+        acc, n = e.get("exec_match"), e.get("exec_scored")
+        if acc is None or not n:
+            continue
+        v = e["variant"]
+        if "no fine-tune" in v:
+            base.append(acc)
+            continue
+        if v.endswith(" (merged)") and v[: -len(" (merged)")] in names:
+            continue
+        s = serve1.get((e["runtime"], v))
+        if not s or not s.get("decode_tok_s_per_req"):
+            continue
+        if v.startswith("ft-"):
+            label, mb = v[3:], sizes.get(f"{v}.gguf")
+        elif "runtime LoRA" in v:
+            label, mb = "Q4_K_M + runtime LoRA", (sizes.get("base-Q4_K_M.gguf") or 0) + (sizes.get("lora-F16.gguf") or 0)
+        elif v == "merged-bf16":
+            label, mb = "bf16 merged", sizes.get("merged")
+        elif v == "base+lora":
+            label, mb = "bf16 + runtime LoRA", (sizes.get("merged") or 0) + (sizes.get("lora-F16.gguf") or 0)
+        else:
+            label, mb = v, None
+        se = (acc * (1 - acc) / n) ** 0.5
+        pts.append({"runtime": e["runtime"], "label": label, "mb": mb, "speed": s["decode_tok_s_per_req"],
+                    "acc": acc, "ci": 1.96 * se, "n": n})
+    return pts, base
+
+
+def pareto(pts):
+    """Points no other point beats on both speed and accuracy, ordered by speed."""
+    front = [p for p in pts if not any(q["speed"] >= p["speed"] and q["acc"] >= p["acc"] and
+                                       (q["speed"] > p["speed"] or q["acc"] > p["acc"]) for q in pts)]
+    return sorted(front, key=lambda p: p["speed"])
+
+
+def _direct_labels(fig, ax, pts, avoid_line=()):
+    """Label every point, trying offsets around it until the text overlaps no other label, point or line."""
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    # (x, y, weight): covering a point is far worse than crossing the line (which shows through the label box)
+    marks = [(*ax.transData.transform((p["speed"], p["acc"])), 100) for p in pts]
+    for a, b in zip(avoid_line, avoid_line[1:]):  # sample the polyline densely so labels steer clear of it
+        marks += [(*ax.transData.transform((a[0] + (b[0] - a[0]) * t / 40, a[1] + (b[1] - a[1]) * t / 40)), 1)
+                  for t in range(41)]
+    taken = []  # display-space bboxes already used
+    # (dx, dy) in points: right, left, then stepped above/below on both sides, nearest first
+    cands = [(8, 0), (-8, 0)] + [(s * dx, k * 11) for k in (1, -1, 2, -2, 3, -3, 4, -4)
+                                 for dx in (8, 24) for s in (1, -1)]
+
+    def place(txt, p, dx, dy):
+        return ax.annotate(txt, (p["speed"], p["acc"]), xytext=(dx, dy), textcoords="offset points",
+                           fontsize=8.5, color=INK, va="center", ha="left" if dx > 0 else "right", zorder=4,
+                           bbox=dict(boxstyle="square,pad=0.1", fc=SURFACE, ec="none", alpha=0.85),
+                           arrowprops=dict(arrowstyle="-", color=AXIS, lw=0.6, shrinkA=0, shrinkB=5)
+                           if dy or abs(dx) > 8 else None)
+
+    for p in sorted(pts, key=lambda p: -p["acc"]):
+        txt = p["label"] + (f" · {p['mb']:,.0f} MB" if p.get("mb") else "")
+        best = None  # (cost, dx, dy): labels must never overlap; marks/line crossings are least-bad fallbacks
+        for dx, dy in cands:
+            t = place(txt, p, dx, dy)
+            bb = t.get_window_extent(r).expanded(1.04, 1.15)
+            t.remove()
+            inside = ax.bbox.contains(bb.x0, bb.y0) and ax.bbox.contains(bb.x1, bb.y1)
+            if not inside or any(bb.overlaps(o) for o in taken):
+                continue
+            cost = sum(w for x, y, w in marks if bb.contains(x, y))
+            if best is None or cost < best[0]:
+                best = (cost, dx, dy, bb)
+            if cost == 0:
+                break
+        dx, dy, bb = (best[1], best[2], best[3]) if best else (8, 0, None)
+        place(txt, p, dx, dy)
+        if bb is not None:
+            taken.append(bb)
+
+
+def summary_chart(pts, base, path):
+    fig, ax = plt.subplots(figsize=(9, 5.4), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    xs = [p["speed"] for p in pts]
+    xlo, xhi = min(xs) - 22, max(xs) + 28  # margins for direct labels on either side
+    if base:
+        lo, hi = min(base), max(base)
+        ax.axhspan(lo - 0.002, hi + 0.002, color=GRID, zorder=0, lw=0)
+        ax.text(xlo + 1, hi + 0.004, f"untuned base model ({lo:.1%}–{hi:.1%})" if hi > lo
+                else f"untuned base model ({lo:.1%})", color=INK2, fontsize=8.5, va="bottom")
+    front = pareto(pts)
+    ax.plot([p["speed"] for p in front], [p["acc"] for p in front], color=INK2, lw=1.2, ls=(0, (4, 3)),
+            zorder=1, label="best trade-offs (nothing is both faster and more accurate)")
+    for rt, col in RUNTIME_COLOR.items():
+        sel = [p for p in pts if p["runtime"] == rt]
+        if not sel:
+            continue
+        ax.errorbar([p["speed"] for p in sel], [p["acc"] for p in sel], yerr=[p["ci"] for p in sel], fmt="none",
+                    ecolor=col, elinewidth=1, alpha=0.35, capsize=0, zorder=2)
+        ax.scatter([p["speed"] for p in sel], [p["acc"] for p in sel], s=70, color=col, edgecolors=SURFACE,
+                   linewidths=2, zorder=5, label="llama.cpp (GGUF)" if rt == "llama.cpp" else "vLLM (bf16)")
+    ax.set_xlim(xlo, xhi)
+    ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.02))
+    ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=0))
+    _direct_labels(fig, ax, pts, [(p["speed"], p["acc"]) for p in front])
+    ax.set_xlabel("generation speed, one request at a time (tokens/s)  →  faster", color=INK2)
+    ax.set_ylabel("SQL answers returning the correct result  →  better", color=INK2)
+    ax.set_title("Fine-tuned Qwen2.5-0.5B on Jetson Orin Nano 8 GB: accuracy vs speed",
+                 color=INK, fontsize=12, loc="left", pad=12)
+    ax.grid(True, color=GRID, lw=0.6); ax.set_axisbelow(True)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color(AXIS)
+    ax.tick_params(colors=MUTED, labelcolor=INK2)
+    n = max(p["n"] for p in pts)
+    ax.legend(loc="lower right", fontsize=8, frameon=False, labelcolor=INK2)
+    fig.text(0.01, 0.01, f"Bars: 95% confidence interval on {n} executable test queries.\nSpeed: mean decode "
+             "rate at concurrency 1, same OpenAI-compatible client for both runtimes.",
+             fontsize=7.5, color=MUTED, va="bottom")
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default="results")
@@ -63,6 +204,7 @@ def main():
         d = json.load(open(dev))
         md.append(f"Device: **{d.get('model')}** · {d.get('l4t')} · RAM {d.get('mem_total_mb')} MB · "
                   f"swap {d.get('swap_total_mb')} MB · power mode `{d.get('power_mode')}`\n")
+    head = len(md)
 
     # ---- training ----
     tr = latest(R["train"], ["run"])
@@ -87,7 +229,19 @@ def main():
         md.append("\n![training](plots/train.png)\n")
 
     sizes = {r["file"]: r["size_mb"] for r in R["model_size"]}
-    if sizes:
+
+    # ---- summary: the one chart to look at, placed right under the training table ----
+    pts, base = summary_points(R, sizes)
+    if pts:
+        summary_chart(pts, base, f"{P}/summary.png")
+        best = {p["label"] for p in pareto(pts)}
+        rows = [{"runtime": p["runtime"], "variant": p["label"], "MB": p["mb"], "tok/s": round(p["speed"], 1),
+                 "exec": f"{p['acc']:.1%} ± {p['ci']:.1%}", "best trade-off": "✓" if p["label"] in best else ""}
+                for p in sorted(pts, key=lambda p: -p["acc"])]
+        summary = ["\n## Summary: accuracy vs speed\n", "![accuracy vs speed](plots/summary.png)\n",
+                   table(rows, ["runtime", "variant", "MB", ("decode tok/s (1 req)", "tok/s"),
+                                ("exec match (95% CI)", "exec"), "best trade-off"])]
+        md[head:head] = summary  # top of the report, right after the device line
         md.append("\n## 2. Exported model sizes\n")
         md.append(table([{"file": k, "MB": v} for k, v in sizes.items()], ["file", "MB"]))
 

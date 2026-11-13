@@ -37,7 +37,11 @@ Switch to `DATASET_PRESET=alpaca` for a generic instruction set (scored by token
 ## Example results
 
 [`results/report.md`](results/report.md) is a full run on an Orin Nano 8 GB Super dev kit (JetPack 6.2, L4T 36.5,
-MAXN_SUPER, desktop running), serving the Qwen2.5-0.5B LoRA fine-tune. Highlights:
+MAXN_SUPER, desktop running), serving the Qwen2.5-0.5B LoRA fine-tune.
+
+![Accuracy vs speed for every deployment variant](results/plots/summary.png)
+
+Highlights:
 
 - Fine-tuning raised SQL execution accuracy from 71.8% to 77.9% (exact match 16% → 29%). Q8_0/Q6_K keep all of
   it; Q4_K_M keeps most (73.8%); Q4_0 loses it (71.8%).
