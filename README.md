@@ -1,8 +1,9 @@
 # orin-lora-bench
 
-Fine-tune a small LLM with **LoRA / QLoRA on a Jetson Orin Nano**, then serve it with **llama.cpp** and **vLLM**
+Fine-tune a small LLM with **LoRA on a Jetson Orin Nano**, then serve it with **llama.cpp** and **vLLM**
 and measure how **quantisation, context length and KV-cache type** trade off against speed, memory fit and
-task accuracy.
+task accuracy. QLoRA (4-bit base) is implemented and swept too, but on 8 GB with the desktop running none of the
+QLoRA runs finished (see results).
 
 Target: **Jetson Orin Nano 8 GB / Orin Nano Super, JetPack 6.2** (L4T r36.4.x, CUDA 12.6, Python 3.10).
 
@@ -41,16 +42,25 @@ MAXN_SUPER, desktop running), serving the Qwen2.5-0.5B LoRA fine-tune.
 
 ![Accuracy vs speed for every deployment variant](results/plots/summary.png)
 
-Highlights:
+Highlights (n = 200 test questions; 149 of them have reference SQL that runs in SQLite):
 
-- Fine-tuning raised SQL execution accuracy from 71.8% to 77.9% (exact match 16% → 29%). Q8_0/Q6_K keep all of
-  it; Q4_K_M keeps most (73.8%); Q4_0 loses it (71.8%).
-- llama.cpp single-stream decode is ~95-100 tok/s for Q4-Q8 GGUFs vs ~54 tok/s for vLLM bf16; at 4 concurrent
-  requests both reach ~190 tok/s.
-- All three 1.5B training configs ran out of memory next to the desktop (QLoRA s512 reached step 97/300).
-- vLLM only starts at `--gpu-memory-utilization` ≤ 0.4 with the desktop running.
+- **Fine-tuning clearly improved exact match with the reference SQL**: 16.5% → 28.5% (F16 vs F16), McNemar
+  p < 0.001. Every quantised variant keeps a significant gain (p ≤ 0.002), including Q4_0.
+- **Execution accuracy rose 72.5% → 77.9%, but that is not significant** (McNemar p = 0.12, 14 vs 6 discordant
+  questions). The fine-tune mostly taught the dataset's SQL style; whether it writes more *correct* SQL needs
+  a larger test set to show.
+- **No quantisation level significantly hurt accuracy** relative to F16 (all p > 0.05; Q4_K_M and Q5_K_M lean
+  lower at p ≈ 0.06), so the quant levels are not ranked here. Re-running the same quant at temperature 0 moved
+  its execution accuracy by up to 4 points (llama.cpp batched decoding is not bit-reproducible).
+- **Speed**: llama.cpp decodes ~93-110 tok/s single-stream for Q4-Q8 GGUFs vs ~51-55 tok/s for vLLM bf16;
+  at 4 concurrent requests both reach ~185-195 tok/s. F16 GGUF is slow single-stream (37 tok/s) but fastest
+  batched (215 tok/s at concurrency 4).
+- **Memory limits on 8 GB (desktop running)**: the 0.5B LoRA run fits only with ~1.7 GB of swap (13.7 s/step);
+  all three 1.5B runs (LoRA s512, QLoRA s512, QLoRA s1024) ran out of memory, the closest at step 97/300.
+  vLLM starts only at `--gpu-memory-utilization` ≤ 0.4, and at 0.4 it can fail by a few MB of free memory.
 
 Speeds measured in different parts of the sweep vary by up to ~20% run to run; compare within a table.
+Significance tests and per-question counts are in section 7 of the report.
 
 ## Before you start
 
@@ -104,7 +114,14 @@ src/bench_client.py        streaming OpenAI-API load generator (TTFT/TPOT/tok/s)
 src/eval_task.py           SQL execution-match / exact-match / F1 eval against any server
 src/sweep_llamacpp.py      llama.cpp parts: bench, ppl, fit, serve, eval, lora
 src/sweep_vllm.py          vLLM parts: fit, serve, eval
-src/report.py              tables + plots
+src/report.py              tables + plots, summary chart, paired McNemar tests
+tests/test_scoring.py      unit tests: SQL cleaning, execution match, token F1, McNemar, trade-off frontier
+```
+
+Run the tests (no GPU, server or downloads needed):
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 ## Software choices (JetPack 6.2)

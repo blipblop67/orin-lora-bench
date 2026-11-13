@@ -168,9 +168,12 @@ def part_serve():
 def part_eval():
     for q, path in models():
         serve_variant(f"ft-{q}", ["-m", path], do_bench=False, do_eval=True)
-    base = os.path.join(G, "base-Q8_0.gguf")
-    if os.path.exists(base):
-        serve_variant("base-Q8_0 (no fine-tune)", ["-m", base], do_bench=False, do_eval=True)
+    # Untuned baselines. base-F16 vs ft-F16 is the like-for-like fine-tuning comparison (same precision);
+    # base-Q8_0 shows the baseline's own quantisation sensitivity.
+    for q in ("F16", "Q8_0"):
+        base = os.path.join(G, f"base-{q}.gguf")
+        if os.path.exists(base):
+            serve_variant(f"base-{q} (no fine-tune)", ["-m", base], do_bench=False, do_eval=True)
 
 
 def part_lora():

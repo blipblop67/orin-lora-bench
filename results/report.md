@@ -8,17 +8,19 @@ Device: **NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super** ·
 ![accuracy vs speed](plots/summary.png)
 
 
-| runtime | variant | MB | decode tok/s (1 req) | exec match (95% CI) | best trade-off |
+| runtime | variant | MB | decode tok/s (1 req) | exact match (95% CI) | exec match (95% CI) |
 |---|---|---|---|---|---|
-| llama.cpp | F16 | 948 | 37.5 | 77.8% ± 6.7% |  |
-| llama.cpp | Q6_K | 482 | 92.7 | 77.8% ± 6.7% | ✓ |
-| llama.cpp | Q8_0 | 506 | 102.9 | 77.2% ± 6.7% | ✓ |
-| llama.cpp | Q4_K_M + runtime LoRA | 396 | 57.6 | 75.2% ± 6.9% |  |
-| llama.cpp | Q5_K_M | 401 | 102.1 | 74.5% ± 7.0% |  |
-| vllm | bf16 merged | 942 | 55.5 | 74.5% ± 7.0% |  |
-| vllm | bf16 + runtime LoRA | 959 | 51.2 | 74.5% ± 7.0% |  |
-| llama.cpp | Q4_K_M | 379 | 99.1 | 73.8% ± 7.1% |  |
-| llama.cpp | Q4_0 | 336 | 110.4 | 71.8% ± 7.2% | ✓ |
+| llama.cpp | Q4_0 | 336 | 110.4 | 25.5% ± 6.0% | 75.8% ± 6.9% |
+| llama.cpp | Q8_0 | 506 | 102.9 | 28.0% ± 6.2% | 77.2% ± 6.7% |
+| llama.cpp | Q5_K_M | 401 | 102.1 | 29.0% ± 6.3% | 74.5% ± 7.0% |
+| llama.cpp | Q4_K_M | 379 | 99.1 | 29.5% ± 6.3% | 73.2% ± 7.1% |
+| llama.cpp | Q6_K | 482 | 92.7 | 28.0% ± 6.2% | 77.8% ± 6.7% |
+| llama.cpp | Q4_K_M + runtime LoRA | 396 | 57.6 | 29.0% ± 6.3% | 75.2% ± 6.9% |
+| vllm | bf16 merged | 942 | 55.5 | 27.0% ± 6.2% | 74.5% ± 7.0% |
+| vllm | bf16 + runtime LoRA | 959 | 51.2 | 28.0% ± 6.2% | 74.5% ± 7.0% |
+| llama.cpp | F16 | 948 | 37.5 | 28.5% ± 6.3% | 77.8% ± 6.7% |
+
+Differences between variants are within the 95% intervals; see section 7 for paired tests.
 
 ## 1. Fine-tuning (LoRA vs QLoRA)
 
@@ -277,15 +279,55 @@ Device: **NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super** ·
 
 | runtime | variant | exec match | exact match | token F1 | n | exec scored | errors |
 |---|---|---|---|---|---|---|---|
+| llama.cpp | base-F16 (no fine-tune) | 0.7248 | 0.165 |  | 200 | 149 | 0 |
 | llama.cpp | base-Q4_K_M + runtime LoRA | 0.7517 | 0.29 |  | 200 | 149 | 0 |
-| llama.cpp | base-Q8_0 (no fine-tune) | 0.7181 | 0.16 |  | 200 | 149 | 0 |
-| llama.cpp | ft-F16 | 0.7785 | 0.29 |  | 200 | 149 | 0 |
-| llama.cpp | ft-Q4_0 | 0.7181 | 0.25 |  | 200 | 149 | 0 |
-| llama.cpp | ft-Q4_K_M | 0.7383 | 0.295 |  | 200 | 149 | 0 |
+| llama.cpp | base-Q8_0 (no fine-tune) | 0.7248 | 0.17 |  | 200 | 149 | 0 |
+| llama.cpp | ft-F16 | 0.7785 | 0.285 |  | 200 | 149 | 0 |
+| llama.cpp | ft-Q4_0 | 0.7584 | 0.255 |  | 200 | 149 | 0 |
+| llama.cpp | ft-Q4_K_M | 0.7315 | 0.295 |  | 200 | 149 | 0 |
 | llama.cpp | ft-Q4_K_M (merged) | 0.7517 | 0.285 |  | 200 | 149 | 0 |
-| llama.cpp | ft-Q5_K_M | 0.745 | 0.295 |  | 200 | 149 | 0 |
-| llama.cpp | ft-Q6_K | 0.7785 | 0.29 |  | 200 | 149 | 0 |
-| llama.cpp | ft-Q8_0 | 0.7718 | 0.29 |  | 200 | 149 | 0 |
+| llama.cpp | ft-Q5_K_M | 0.745 | 0.29 |  | 200 | 149 | 0 |
+| llama.cpp | ft-Q6_K | 0.7785 | 0.28 |  | 200 | 149 | 0 |
+| llama.cpp | ft-Q8_0 | 0.7718 | 0.28 |  | 200 | 149 | 0 |
 | vllm | base+lora | 0.745 | 0.28 |  | 200 | 149 | 0 |
 | vllm | base-bf16 (no fine-tune) | 0.698 | 0.195 |  | 200 | 149 | 0 |
 | vllm | merged-bf16 | 0.745 | 0.27 |  | 200 | 149 | 0 |
+
+
+## 7. Is the difference real? (paired exact McNemar test, llama.cpp)
+
+Both models answer the same questions; the test only looks at questions exactly one of them got right. p < 0.05 means that imbalance is unlikely to be chance. Exec match is scored only on questions whose reference SQL runs in SQLite.
+
+
+### Fine-tuned vs untuned base (both F16 unless named): did fine-tuning help?
+
+| variant | metric | n | ref % | variant % | only variant right | only ref right | p | verdict |
+|---|---|---|---|---|---|---|---|---|
+| ft-F16 | exact match | 200 | 16.5% | 28.5% | 29 | 5 | 3.86e-05 | significant |
+| ft-F16 | exec match | 149 | 72.5% | 77.9% | 14 | 6 | 0.115 | not significant |
+| ft-Q4_0 | exact match | 200 | 16.5% | 25.5% | 25 | 7 | 0.0021 | significant |
+| ft-Q4_0 | exec match | 149 | 72.5% | 75.8% | 12 | 7 | 0.359 | not significant |
+| ft-Q4_K_M | exact match | 200 | 16.5% | 29.5% | 31 | 5 | 1.29e-05 | significant |
+| ft-Q4_K_M | exec match | 149 | 72.5% | 73.2% | 8 | 7 | 1 | not significant |
+| ft-Q5_K_M | exact match | 200 | 16.5% | 29.0% | 32 | 7 | 7.03e-05 | significant |
+| ft-Q5_K_M | exec match | 149 | 72.5% | 74.5% | 12 | 9 | 0.664 | not significant |
+| ft-Q6_K | exact match | 200 | 16.5% | 28.0% | 28 | 5 | 6.62e-05 | significant |
+| ft-Q6_K | exec match | 149 | 72.5% | 77.9% | 14 | 6 | 0.115 | not significant |
+| ft-Q8_0 | exact match | 200 | 16.5% | 28.0% | 28 | 5 | 6.62e-05 | significant |
+| ft-Q8_0 | exec match | 149 | 72.5% | 77.2% | 14 | 7 | 0.189 | not significant |
+
+
+### Quantised vs fine-tuned F16: did quantisation cost accuracy?
+
+| variant | metric | n | ref % | variant % | only variant right | only ref right | p | verdict |
+|---|---|---|---|---|---|---|---|---|
+| ft-Q4_0 | exact match | 200 | 28.5% | 25.5% | 7 | 13 | 0.263 | not significant |
+| ft-Q4_0 | exec match | 149 | 77.9% | 75.8% | 6 | 9 | 0.607 | not significant |
+| ft-Q4_K_M | exact match | 200 | 28.5% | 29.5% | 7 | 5 | 0.774 | not significant |
+| ft-Q4_K_M | exec match | 149 | 77.9% | 73.2% | 2 | 9 | 0.0654 | not significant |
+| ft-Q5_K_M | exact match | 200 | 28.5% | 29.0% | 3 | 2 | 1 | not significant |
+| ft-Q5_K_M | exec match | 149 | 77.9% | 74.5% | 0 | 5 | 0.0625 | not significant |
+| ft-Q6_K | exact match | 200 | 28.5% | 28.0% | 1 | 2 | 1 | not significant |
+| ft-Q6_K | exec match | 149 | 77.9% | 77.9% | 2 | 2 | 1 | not significant |
+| ft-Q8_0 | exact match | 200 | 28.5% | 28.0% | 1 | 2 | 1 | not significant |
+| ft-Q8_0 | exec match | 149 | 77.9% | 77.2% | 0 | 1 | 1 | not significant |
