@@ -21,6 +21,7 @@ class Server:
         self.name, self.port, self.argv = name, port, argv
         self.image, self.native_bin, self.ipc_host = image, native_bin, ipc_host
         self.proc = None
+        self._log = None
         self.logfile = os.path.join(ROOT, "outputs", "logs", f"{name}.log")
         os.makedirs(os.path.dirname(self.logfile), exist_ok=True)
 
@@ -97,6 +98,9 @@ class Server:
                     self.proc.wait(30)
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
+            if self._log:
+                self._log.close()
+                self._log = None
         else:
             _run(["docker", "rm", "-f", self.name])
         time.sleep(2)  # let unified memory be reclaimed before the next measurement

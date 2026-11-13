@@ -27,9 +27,10 @@ fi
 
 # ---- Docker ----
 command -v docker >/dev/null || die "docker not installed (sudo apt install nvidia-container docker.io)"
+docker info >/dev/null 2>&1 \
+  || die "Cannot reach docker as $USER. Run: sudo usermod -aG docker $USER, then log out and back in (or reboot)."
 docker info 2>/dev/null | grep -qi 'runtimes.*nvidia' \
   || warn "docker does not list the nvidia runtime; set \"default-runtime\": \"nvidia\" in /etc/docker/daemon.json"
-id -nG | grep -qw docker || warn "User not in docker group: sudo usermod -aG docker \$USER && newgrp docker"
 
 log "Pulling containers"
 docker pull "$LLAMA_CPP_IMAGE"
@@ -40,12 +41,36 @@ log "Creating venv at $VENV"
 sudo apt-get install -y python3-venv python3-dev git >/dev/null
 python3 -m venv "$VENV"
 "$PY" -m pip install -U pip wheel >/dev/null
-log "Installing torch from $JETSON_PIP_INDEX"
-"$PY" -m pip install --index-url "$JETSON_PIP_INDEX" --extra-index-url https://pypi.org/simple torch "numpy<2"
-"$PY" -m pip install -r "$ROOT/requirements.txt"
+rm -f "$VENV/.setup-ok"
+
+# pip has no index priority: with PyPI as an extra index it picks the newest torch anywhere, and PyPI's
+# aarch64 wheels (e.g. 2.14+cu130) are newer than the Jetson builds but need a newer driver than JetPack 6.
+# So look up the newest version on the Jetson index and pin to exactly that.
+jetson_version() {
+  "$PY" -m pip index versions "$1" --pre --index-url "$JETSON_PIP_INDEX" 2>/dev/null \
+    | sed -n "s/^$1 (\(.*\))$/\1/p"
+}
+TORCH_VER="${TORCH_VERSION:-$(jetson_version torch)}"
+[ -n "$TORCH_VER" ] || die "Could not list torch versions on $JETSON_PIP_INDEX"
+log "Installing torch==$TORCH_VER from $JETSON_PIP_INDEX"
+"$PY" -m pip install --index-url "$JETSON_PIP_INDEX" --extra-index-url https://pypi.org/simple \
+  "torch==$TORCH_VER" "numpy<2"
+
 log "Installing bitsandbytes (needed for QLoRA)"
-"$PY" -m pip install --index-url "$JETSON_PIP_INDEX" --extra-index-url https://pypi.org/simple bitsandbytes \
-  || warn "bitsandbytes install failed: qlora runs will be skipped/fail; lora runs still work."
+BNB_VER="$(jetson_version bitsandbytes)"
+if [ -n "$BNB_VER" ]; then
+  "$PY" -m pip install --index-url "$JETSON_PIP_INDEX" --extra-index-url https://pypi.org/simple \
+    "bitsandbytes==$BNB_VER" \
+    || warn "bitsandbytes install failed: qlora runs will be skipped/fail; lora runs still work."
+else
+  warn "No bitsandbytes on $JETSON_PIP_INDEX: qlora runs will be skipped/fail; lora runs still work."
+fi
+
+# Keep the Jetson builds (and the numpy 1.x they were compiled against) when the remaining
+# requirements pull in torch or numpy as a dependency.
+CONSTRAINTS="$VENV/jetson-constraints.txt"
+"$PY" -m pip freeze | grep -iE '^(torch|bitsandbytes|numpy)==' > "$CONSTRAINTS" || true
+"$PY" -m pip install -r "$ROOT/requirements.txt" -c "$CONSTRAINTS"
 
 log "Verifying CUDA in torch"
 if ! "$PY" - <<'EOF'
@@ -57,7 +82,7 @@ assert (p.major, p.minor) == (8, 7), "expected sm_87 (Orin)"
 x = torch.randn(1024, 1024, device="cuda", dtype=torch.bfloat16); (x @ x).sum().item()
 EOF
 then
-  warn "If the error mentions libcusparseLt.so, install cuSPARSELt for CUDA 12.6 (see README > Troubleshooting)."
+  warn "If the error mentions libcusparseLt.so or libcudss.so, see README > Troubleshooting."
   die "torch CUDA check failed"
 fi
 "$PY" -c "import bitsandbytes as b; print('bitsandbytes', b.__version__)" 2>/dev/null || warn "bitsandbytes not importable"
@@ -67,7 +92,9 @@ if [ ! -d "$ROOT/third_party/llama.cpp" ]; then
   log "Cloning llama.cpp ($LLAMA_CPP_REF) for convert_hf_to_gguf.py / convert_lora_to_gguf.py"
   git clone --depth 1 --branch "$LLAMA_CPP_REF" https://github.com/ggml-org/llama.cpp "$ROOT/third_party/llama.cpp"
 fi
-"$PY" -m pip install "$ROOT/third_party/llama.cpp/gguf-py"
+# --no-deps: gguf-py declares numpy>=2.2.6, which breaks the Jetson torch build; it works fine on numpy 1.26
+# and its other deps (pyyaml, tqdm, requests) already come from requirements.txt.
+"$PY" -m pip install --no-deps "$ROOT/third_party/llama.cpp/gguf-py"
 
 log "Checking llama.cpp container tools"
 for t in llama-server llama-bench llama-quantize llama-perplexity; do
@@ -81,4 +108,5 @@ log "Caching dataset and base model"
 "$PY" -c "from huggingface_hub import snapshot_download as s; print(s('$BASE_MODEL'))"
 
 "$PY" "$ROOT/src/memmon.py" --device-meta > "$RESULTS/device.json"
+touch "$VENV/.setup-ok"   # run_all.sh only skips setup when this exists
 log "Setup complete. Device info saved to results/device.json"
