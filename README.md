@@ -34,6 +34,20 @@ The task is text-to-SQL (`gretelai/synthetic_text_to_sql`): small models get vis
 answers can be checked by running them, so "did quantisation hurt the fine-tune?" gets a real number.
 Switch to `DATASET_PRESET=alpaca` for a generic instruction set (scored by token F1).
 
+## Example results
+
+[`results/report.md`](results/report.md) is a full run on an Orin Nano 8 GB Super dev kit (JetPack 6.2, L4T 36.5,
+MAXN_SUPER, desktop running), serving the Qwen2.5-0.5B LoRA fine-tune. Highlights:
+
+- Fine-tuning raised SQL execution accuracy from 71.8% to 77.9% (exact match 16% → 29%). Q8_0/Q6_K keep all of
+  it; Q4_K_M keeps most (73.8%); Q4_0 loses it (71.8%).
+- llama.cpp single-stream decode is ~95-100 tok/s for Q4-Q8 GGUFs vs ~54 tok/s for vLLM bf16; at 4 concurrent
+  requests both reach ~190 tok/s.
+- All three 1.5B training configs ran out of memory next to the desktop (QLoRA s512 reached step 97/300).
+- vLLM only starts at `--gpu-memory-utilization` ≤ 0.4 with the desktop running.
+
+Speeds measured in different parts of the sweep vary by up to ~20% run to run; compare within a table.
+
 ## Before you start
 
 1. **Power mode**: `sudo bash scripts/power_max.sh` (it picks MAXN_SUPER or MAXN out of `/etc/nvpmodel.conf` and runs `jetson_clocks`).
@@ -43,7 +57,9 @@ Switch to `DATASET_PRESET=alpaca` for a generic instruction set (scored by token
    - go headless (`sudo systemctl set-default multi-user.target && sudo reboot`, which frees about 1 GB; undo with `graphical.target`)
    - swap a zram for an NVMe swapfile (setup prints the commands). Swap keeps a run from being OOM-killed,
      but the `swap peak MB` column shows when a result was only reached by swapping, so treat that row as "doesn't really fit".
-4. Docker with the NVIDIA runtime and your user in the `docker` group.
+4. Docker with the NVIDIA runtime and your user in the `docker` group
+   (`sudo usermod -aG docker $USER`, then log out and back in). Don't run the scripts with `sudo`:
+   they stop if you do, because root-owned venv/cache/output files break later runs.
 
 ## Run
 
@@ -115,6 +131,21 @@ src/report.py              tables + plots
 - QLoRA adapters are merged into the bf16 base. The eval table shows whether that, or quantisation, cost accuracy.
 
 ## Troubleshooting
+
+- **`The NVIDIA driver on your system is too old`** / `torch CUDA check failed`: a torch wheel from PyPI (built for a
+  newer CUDA) replaced the Jetson build. `00_setup.sh` now pins torch and bitsandbytes to the newest version on
+  `JETSON_PIP_INDEX`; delete `.venv` and re-run setup.
+- **`[warn] drop_caches needs passwordless sudo`**: on JetPack < 7.2, memory freed by a finished CUDA process can
+  sit in caches and look used, which inflates the next config's baseline. To let the scripts drop caches, add a
+  sudoers rule limited to that one command (`sudo visudo -f /etc/sudoers.d/drop-caches`):
+  `<your-user> ALL=(root) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches`. Or set `DROP_CACHES=0` to silence it.
+- **Training fails with `NVML_SUCCESS == r INTERNAL ASSERT FAILED`** and `NvMapMemAllocInternalTagged ... error 12`
+  in the log: that is an out-of-memory on Jetson (recorded as `oom`). Use `BATCH=1`, close the browser, or go headless.
+- **`libcudss.so.0` not found** when importing torch: torch 2.9.1 and newer from the Jetson index need NVIDIA cuDSS,
+  which JetPack 6 doesn't include. `TORCH_VERSION` in `config.env` defaults to 2.8.0, which doesn't. To use a newer
+  torch, install cuDSS for aarch64-jetson from NVIDIA's cuDSS downloads, then raise `TORCH_VERSION`.
+- **Permission denied on `.venv`, `outputs/` or `~/.cache/huggingface`**: an earlier run used `sudo`. Take the files
+  back with `sudo chown -R $USER:$USER .venv outputs results third_party ~/.cache/huggingface`, or delete `.venv`.
 
 - **`libcusparseLt.so` not found** when importing torch: install cuSPARSELt for CUDA 12.6 (aarch64-jetson) from
   NVIDIA's cuSPARSELt downloads, or pick a torch wheel from the same index that doesn't need it.
