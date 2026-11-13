@@ -2,6 +2,24 @@
 
 Device: **NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super** · # R36 (release), REVISION: 5.0, GCID: 43688277, BOARD: generic, EABI: aarch64, DATE: Fri Jan 16 03:50:45 UTC 2026 · RAM 7607 MB · swap 3803 MB · power mode `MAXN_SUPER`
 
+
+## Summary: accuracy vs speed
+
+![accuracy vs speed](plots/summary.png)
+
+
+| runtime | variant | MB | decode tok/s (1 req) | exec match (95% CI) | best trade-off |
+|---|---|---|---|---|---|
+| llama.cpp | F16 | 948 | 37.5 | 77.8% ± 6.7% |  |
+| llama.cpp | Q6_K | 482 | 92.7 | 77.8% ± 6.7% | ✓ |
+| llama.cpp | Q8_0 | 506 | 102.9 | 77.2% ± 6.7% | ✓ |
+| llama.cpp | Q4_K_M + runtime LoRA | 396 | 57.6 | 75.2% ± 6.9% |  |
+| llama.cpp | Q5_K_M | 401 | 102.1 | 74.5% ± 7.0% |  |
+| vllm | bf16 merged | 942 | 55.5 | 74.5% ± 7.0% |  |
+| vllm | bf16 + runtime LoRA | 959 | 51.2 | 74.5% ± 7.0% |  |
+| llama.cpp | Q4_K_M | 379 | 99.1 | 73.8% ± 7.1% |  |
+| llama.cpp | Q4_0 | 336 | 110.4 | 71.8% ± 7.2% | ✓ |
+
 ## 1. Fine-tuning (LoRA vs QLoRA)
 
 
