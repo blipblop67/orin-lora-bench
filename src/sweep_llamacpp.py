@@ -22,7 +22,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 from bench_client import run_bench  # noqa: E402
 from eval_task import run_eval  # noqa: E402
-from memmon import device_meta, drop_caches, used_mb  # noqa: E402
+from memmon import device_meta, drop_caches, image_digest, used_mb  # noqa: E402
 from servers import llama_fa_args, llama_server  # noqa: E402
 
 E = os.environ
@@ -32,6 +32,7 @@ TOK = os.path.join(ROOT, "outputs", "merged")
 RES = os.path.join(ROOT, "results")
 PORT = int(E.get("LCPP_PORT", 8080))
 POWER = device_meta()["power_mode"]
+IMAGE = None if E.get("LLAMA_CPP_BIN_DIR") else image_digest(E.get("LLAMA_CPP_IMAGE"))
 
 
 def lst(name, default=""):
@@ -39,7 +40,7 @@ def lst(name, default=""):
 
 
 def write(part, rec):
-    rec = {"kind": f"lcpp_{part}", "runtime": "llama.cpp", "power_mode": POWER, **rec}
+    rec = {"kind": f"lcpp_{part}", "runtime": "llama.cpp", "power_mode": POWER, "image": IMAGE, **rec}
     with open(os.path.join(RES, f"lcpp_{part}.jsonl"), "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(json.dumps(rec), flush=True)
@@ -49,6 +50,7 @@ def tool(name):
     if E.get("LLAMA_CPP_BIN_DIR"):
         return [os.path.join(E["LLAMA_CPP_BIN_DIR"], name)]
     return ["docker", "run", "--rm", "--runtime", "nvidia", "--network", "host",
+            "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{ROOT}:{ROOT}", "-w", ROOT, E["LLAMA_CPP_IMAGE"], name]
 
 

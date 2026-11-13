@@ -23,7 +23,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 from bench_client import run_bench  # noqa: E402
 from eval_task import run_eval  # noqa: E402
-from memmon import device_meta, drop_caches, used_mb  # noqa: E402
+from memmon import device_meta, drop_caches, image_digest, used_mb  # noqa: E402
 from servers import vllm_server  # noqa: E402
 
 E = os.environ
@@ -33,6 +33,7 @@ RES = os.path.join(ROOT, "results")
 PORT = int(E.get("VLLM_PORT", 8000))
 TOK = os.path.join(OUT, "merged")
 POWER = device_meta()["power_mode"]
+IMAGE = image_digest(E.get("VLLM_IMAGE"))
 ADAPTER = os.path.join(OUT, "train", E.get("SERVE_RUN", ""), "adapter")
 
 
@@ -48,7 +49,7 @@ def variants():
 
 
 def write(part, rec):
-    rec = {"kind": f"vllm_{part}", "runtime": "vllm", "power_mode": POWER, **rec}
+    rec = {"kind": f"vllm_{part}", "runtime": "vllm", "power_mode": POWER, "image": IMAGE, **rec}
     with open(os.path.join(RES, f"vllm_{part}.jsonl"), "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(json.dumps(rec), flush=True)

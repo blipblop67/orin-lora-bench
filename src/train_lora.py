@@ -143,6 +143,8 @@ def main():
         tok.pad_token = tok.eos_token
     train, dropped = build(tok, a.preset, "train", a.train_samples, a.max_seq_len)
     evals, _ = build(tok, a.preset, "test", a.eval_samples, a.max_seq_len)
+    if not train:
+        sys.exit(f"All {dropped} training examples have prompts longer than --max-seq-len {a.max_seq_len}")
     avg_tokens = sum(len(x["input_ids"]) for x in train) / len(train)
     rec.update(train_examples=len(train), dropped_too_long=dropped, avg_tokens_per_example=round(avg_tokens, 1))
 
@@ -173,8 +175,9 @@ def main():
                               data_collator=Collator(tok.pad_token_id), callbacks=[timer])
             res = trainer.train()
             ev = trainer.evaluate()
+            # Adapter weights only: the tokenizer is the base model's (merge_adapter.py copies it from there),
+            # and a transformers-5 tokenizer saved here would break vLLM's transformers 4.x loading the adapter.
             model.save_pretrained(os.path.join(out, "adapter"))
-            tok.save_pretrained(os.path.join(out, "adapter"))
             m = res.metrics
             st = sorted(timer.times[3:]) or timer.times  # skip warm-up steps
             rec.update(
@@ -186,7 +189,10 @@ def main():
                 eval_loss=round(ev["eval_loss"], 4), eval_ppl=round(math.exp(ev["eval_loss"]), 3),
                 loss_curve=timer.losses)
         except (torch.cuda.OutOfMemoryError, RuntimeError) as ex:
-            if "out of memory" not in str(ex).lower() and not isinstance(ex, torch.cuda.OutOfMemoryError):
+            # On Jetson an allocation failure often surfaces as "NVML_SUCCESS == r INTERNAL ASSERT FAILED"
+            # (the allocator's OOM path queries NVML, which Tegra lacks) instead of a clean OutOfMemoryError.
+            msg = str(ex).lower()
+            if not (isinstance(ex, torch.cuda.OutOfMemoryError) or "out of memory" in msg or "nvml_success" in msg):
                 raise
             status = "oom"
             rec["error"] = str(ex)[:400]
