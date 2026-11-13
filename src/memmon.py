@@ -72,12 +72,37 @@ def device_meta() -> dict:
     }
 
 
-def drop_caches() -> None:
-    """Best effort; needs passwordless sudo. Controlled by DROP_CACHES=1."""
-    if os.environ.get("DROP_CACHES", "0") != "1":
-        return
-    subprocess.run("sync && echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null",
-                   shell=True, check=False)
+def image_digest(image: str | None) -> str | None:
+    """Pinned digest of a local docker image (tags like :latest move; the digest says what actually ran)."""
+    if not image:
+        return None
+    out = _sh(["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image])
+    return out or None
+
+
+_DROP_OK: bool | None = None
+
+
+def drop_caches() -> bool:
+    """sync + drop page/dentry/inode caches between CUDA workloads.
+
+    On JetPack < 7.2 (L4T < r39) memory freed by an exited CUDA process can stay in caches and look
+    used, which skews the next config's baseline and fit result. Needs root or passwordless sudo.
+    DROP_CACHES=0 off, 1 on, auto (default) on when `sudo -n` works, otherwise warn once and skip.
+    """
+    global _DROP_OK
+    mode = os.environ.get("DROP_CACHES", "auto")
+    if mode == "0" or _DROP_OK is False:
+        return False
+    cmd = "sync && echo 3 | tee /proc/sys/vm/drop_caches >/dev/null"
+    if os.geteuid() != 0:
+        cmd = "sync && echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null"
+    ok = subprocess.run(cmd, shell=True, check=False, stderr=subprocess.DEVNULL).returncode == 0
+    if not ok and _DROP_OK is None:
+        print("[warn] drop_caches needs passwordless sudo; skipping. Baselines between configs may be "
+              "inflated by cached memory (see README > Troubleshooting).", file=sys.stderr, flush=True)
+    _DROP_OK = ok
+    return ok
 
 
 class MemMonitor:
@@ -140,6 +165,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--snapshot", action="store_true")
     ap.add_argument("--device-meta", action="store_true")
+    ap.add_argument("--drop-caches", action="store_true", help="drop caches per DROP_CACHES, print used MB")
     ap.add_argument("--out")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args()
@@ -147,7 +173,13 @@ def main():
         print(used_mb())
         return
     if a.device_meta:
-        print(json.dumps(device_meta(), indent=2))
+        meta = device_meta()
+        meta["images"] = {k: image_digest(os.environ.get(k)) for k in ("LLAMA_CPP_IMAGE", "VLLM_IMAGE")}
+        print(json.dumps(meta, indent=2))
+        return
+    if a.drop_caches:
+        drop_caches()
+        print(used_mb())
         return
     cmd = a.cmd[1:] if a.cmd and a.cmd[0] == "--" else a.cmd
     if not cmd:

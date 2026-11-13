@@ -4,6 +4,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export ROOT
+
+# Under sudo HOME becomes /root, so the HF cache, venv and outputs end up root-owned and later
+# non-sudo runs fail. Scripts call sudo themselves where needed; power_max.sh does not source this.
+if [ "$(id -u)" -eq 0 ] && [ "${ALLOW_ROOT:-0}" != 1 ]; then
+  printf '\033[1;31m[error]\033[0m Do not run these scripts with sudo. Add yourself to the docker group instead:\n' >&2
+  printf '  sudo usermod -aG docker %s   (then log out and back in)\n' "${SUDO_USER:-\$USER}" >&2
+  printf '  Set ALLOW_ROOT=1 to override.\n' >&2
+  exit 1
+fi
 # shellcheck source=/dev/null
 . "$ROOT/config.env"
 # shellcheck source=/dev/null
@@ -58,7 +67,8 @@ lcpp() {
   if [ -n "${LLAMA_CPP_BIN_DIR}" ]; then
     "${LLAMA_CPP_BIN_DIR}/${tool}" "$@"
   else
-    docker run --rm --runtime nvidia --network host \
+    # --user so the GGUF files it writes are owned by you, not root
+    docker run --rm --runtime nvidia --network host --user "$(id -u):$(id -g)" \
       -v "$ROOT:$ROOT" -w "$ROOT" "$LLAMA_CPP_IMAGE" "$tool" "$@"
   fi
 }

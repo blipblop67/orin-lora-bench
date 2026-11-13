@@ -5,6 +5,10 @@
 #        scripts/10_train.sh 2          # only the 2nd entry (1-based)
 . "$(dirname "$0")/common.sh"
 require_jetson; require_venv; check_power_mode
+# Unified memory: blocks PyTorch's caching allocator keeps reserved are lost to the whole system. The 0.5B run
+# reserved 3.8 GB for 2.0 GB of live tensors; expandable segments map memory in place instead of caching
+# fixed-size blocks, which cuts that fragmentation.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 entries=("${TRAIN_MATRIX[@]}")
 if [ $# -ge 1 ]; then entries=("${TRAIN_MATRIX[$(( $1 - 1 ))]}"); fi
@@ -13,7 +17,8 @@ for e in "${entries[@]}"; do
   IFS='|' read -r model mode seq steps <<<"$e"
   name="$(basename "$model")_${mode}_s${seq}"
   log "Training $name (steps=$steps)"
-  "$PY" "$ROOT/src/memmon.py" --snapshot >/dev/null
+  # Start each run from a clean baseline: on L4T < r39 the previous run's freed CUDA memory can sit in caches.
+  "$PY" "$ROOT/src/memmon.py" --drop-caches >/dev/null
   set +e
   "$PY" "$ROOT/src/train_lora.py" --model "$model" --mode "$mode" --max-seq-len "$seq" --max-steps "$steps" \
     2>&1 | tee "$OUT/train_${name}.log"

@@ -7,3 +7,5 @@ results/
 config.local.env
 __pycache__/
 *.pyc
+# written by the vLLM container (runs as root, working dir = repo)
+compiled_cache.db
