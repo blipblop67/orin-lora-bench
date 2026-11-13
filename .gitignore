@@ -3,7 +3,10 @@
 .venv-quant/
 outputs/
 third_party/
-results/
+# raw run data stays local; the example report and its charts are committed on purpose
+results/*
+!results/report.md
+!results/plots/
 config.local.env
 __pycache__/
 *.pyc

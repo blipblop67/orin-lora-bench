@@ -6,6 +6,7 @@ import glob
 import json
 import os
 from collections import defaultdict
+from math import comb
 
 import matplotlib
 
@@ -51,13 +52,51 @@ def qkey(q):
     return QUANT_ORDER.index(q) if q in QUANT_ORDER else 99
 
 
+def mcnemar_exact(a, b):
+    """Paired exact McNemar test on per-question 0/1 outcomes (None = not scored, pair skipped).
+
+    Returns (only_a, only_b, p): questions only A got right, only B got right, and the two-sided p-value of
+    an exact binomial test on those discordant pairs (H0: either is equally likely to be the one that's right).
+    """
+    only_a = sum(1 for x, y in zip(a, b) if x is not None and y is not None and x and not y)
+    only_b = sum(1 for x, y in zip(a, b) if x is not None and y is not None and y and not x)
+    n = only_a + only_b
+    if n == 0:
+        return only_a, only_b, 1.0
+    k = min(only_a, only_b)
+    tail = sum(comb(n, i) for i in range(k + 1)) / 2 ** n
+    return only_a, only_b, min(1.0, 2 * tail)
+
+
+def paired_rows(evals, ref_variant):
+    """McNemar of every other variant (same runtime, per-item data present) against ref_variant."""
+    by = {e["variant"]: e for e in evals if e.get("per_item")}
+    ref = by.get(ref_variant)
+    if not ref:
+        return []
+    rows = []
+    for v, e in sorted(by.items(), key=lambda kv: kv[0]):
+        if v == ref_variant:
+            continue
+        for metric, key in (("exact match", "exact"), ("exec match", "exec")):
+            a, b = e["per_item"][key], ref["per_item"][key]
+            scored = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+            only_v, only_ref, p = mcnemar_exact(a, b)
+            rows.append({"variant": v, "metric": metric, "n": len(scored),
+                         "ref %": f"{sum(y for _, y in scored) / max(1, len(scored)):.1%}",
+                         "variant %": f"{sum(x for x, _ in scored) / max(1, len(scored)):.1%}",
+                         "only variant right": only_v, "only ref right": only_ref,
+                         "p": f"{p:.3g}", "verdict": "significant" if p < 0.05 else "not significant"})
+    return rows
+
+
 # Summary chart colours: slots 1-2 of a CVD-validated categorical palette, plus neutral chart chrome.
 RUNTIME_COLOR = {"llama.cpp": "#2a78d6", "vllm": "#eb6834"}
 SURFACE, INK, INK2, MUTED, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 
 
 def summary_points(R, sizes):
-    """One point per deployable variant: single-stream decode speed vs execution accuracy.
+    """One point per deployable variant: single-stream decode speed vs exact match and execution accuracy.
 
     Untuned baselines have no serve record and come back separately as a reference band.
     'ft-X (merged)' rows (llama.cpp lora part) re-measure the same file as 'ft-X', so they are dropped.
@@ -67,33 +106,38 @@ def summary_points(R, sizes):
               if r.get("status") == "ok" and r.get("concurrency") == 1}
     evals = latest(R["lcpp_eval"] + R["vllm_eval"], ["runtime", "variant"])
     names = {v for _, v in serve1}
-    pts, base = [], []
+    pts, base = [], {"exact": [], "exec": []}
     for e in evals:
-        acc, n = e.get("exec_match"), e.get("exec_scored")
-        if acc is None or not n:
+        n_exec, n_exact = e.get("exec_scored"), (e.get("n") or 0) - (e.get("errors") or 0)
+        if e.get("exec_match") is None or not n_exec or not n_exact:
             continue
         v = e["variant"]
         if "no fine-tune" in v:
-            base.append(acc)
+            base["exact"].append(e["exact_match"]); base["exec"].append(e["exec_match"])
             continue
         if v.endswith(" (merged)") and v[: -len(" (merged)")] in names:
             continue
         s = serve1.get((e["runtime"], v))
         if not s or not s.get("decode_tok_s_per_req"):
             continue
+        # label: table text; short: chart text (sizes live in the table, so the chart stays uncluttered)
         if v.startswith("ft-"):
-            label, mb = v[3:], sizes.get(f"{v}.gguf")
+            label, short, mb = v[3:], v[3:], sizes.get(f"{v}.gguf")
         elif "runtime LoRA" in v:
-            label, mb = "Q4_K_M + runtime LoRA", (sizes.get("base-Q4_K_M.gguf") or 0) + (sizes.get("lora-F16.gguf") or 0)
+            label, short = "Q4_K_M + runtime LoRA", "Q4_K_M+LoRA"
+            mb = (sizes.get("base-Q4_K_M.gguf") or 0) + (sizes.get("lora-F16.gguf") or 0)
         elif v == "merged-bf16":
-            label, mb = "bf16 merged", sizes.get("merged")
+            label, short, mb = "bf16 merged", "bf16", sizes.get("merged")
         elif v == "base+lora":
-            label, mb = "bf16 + runtime LoRA", (sizes.get("merged") or 0) + (sizes.get("lora-F16.gguf") or 0)
+            label, short = "bf16 + runtime LoRA", "bf16+LoRA"
+            mb = (sizes.get("merged") or 0) + (sizes.get("lora-F16.gguf") or 0)
         else:
-            label, mb = v, None
-        se = (acc * (1 - acc) / n) ** 0.5
-        pts.append({"runtime": e["runtime"], "label": label, "mb": mb, "speed": s["decode_tok_s_per_req"],
-                    "acc": acc, "ci": 1.96 * se, "n": n})
+            label, short, mb = v, v, None
+        ci = lambda p, n: 1.96 * (p * (1 - p) / n) ** 0.5  # noqa: E731  (normal-approx 95% CI half-width)
+        pts.append({"runtime": e["runtime"], "label": label, "short": short, "mb": mb,
+                    "speed": s["decode_tok_s_per_req"],
+                    "exact": e["exact_match"], "exact_ci": ci(e["exact_match"], n_exact), "n_exact": n_exact,
+                    "exec": e["exec_match"], "exec_ci": ci(e["exec_match"], n_exec), "n_exec": n_exec})
     return pts, base
 
 
@@ -104,18 +148,19 @@ def pareto(pts):
     return sorted(front, key=lambda p: p["speed"])
 
 
-def _direct_labels(fig, ax, pts, avoid_line=()):
+def _direct_labels(fig, ax, pts, avoid_line=(), avoid_text=()):
     """Label every point, trying offsets around it until the text overlaps no other label, point or line."""
     fig.canvas.draw()
     r = fig.canvas.get_renderer()
     # (x, y, weight): covering a point is far worse than crossing the line (which shows through the label box)
     marks = [(*ax.transData.transform((p["speed"], p["acc"])), 100) for p in pts]
+    own = {id(p): ax.transData.transform((p["speed"], p["acc"])) for p in pts}
     for a, b in zip(avoid_line, avoid_line[1:]):  # sample the polyline densely so labels steer clear of it
         marks += [(*ax.transData.transform((a[0] + (b[0] - a[0]) * t / 40, a[1] + (b[1] - a[1]) * t / 40)), 1)
                   for t in range(41)]
-    taken = []  # display-space bboxes already used
+    taken = [t.get_window_extent(r).expanded(1.02, 1.2) for t in avoid_text]  # display-space bboxes in use
     # (dx, dy) in points: right, left, then stepped above/below on both sides, nearest first
-    cands = [(8, 0), (-8, 0)] + [(s * dx, k * 11) for k in (1, -1, 2, -2, 3, -3, 4, -4)
+    cands = [(8, 0), (-8, 0)] + [(s * dx, k * 12) for k in (1, -1, 2, -2, 3, -3, 4, -4)
                                  for dx in (8, 24) for s in (1, -1)]
 
     def place(txt, p, dx, dy):
@@ -126,16 +171,20 @@ def _direct_labels(fig, ax, pts, avoid_line=()):
                            if dy or abs(dx) > 8 else None)
 
     for p in sorted(pts, key=lambda p: -p["acc"]):
-        txt = p["label"] + (f" · {p['mb']:,.0f} MB" if p.get("mb") else "")
+        txt = p.get("short", p["label"])
         best = None  # (cost, dx, dy): labels must never overlap; marks/line crossings are least-bad fallbacks
         for dx, dy in cands:
             t = place(txt, p, dx, dy)
-            bb = t.get_window_extent(r).expanded(1.04, 1.15)
+            bb = t.get_window_extent(r).expanded(1.04, 1.02)
             t.remove()
             inside = ax.bbox.contains(bb.x0, bb.y0) and ax.bbox.contains(bb.x1, bb.y1)
             if not inside or any(bb.overlaps(o) for o in taken):
                 continue
             cost = sum(w for x, y, w in marks if bb.contains(x, y))
+            # a label that merely sits beside another point reads as that point's label: penalise it too
+            near = bb.expanded(1.25, 2.4)
+            cost += 30 * sum(1 for q in pts if q is not p and near.contains(*own[id(q)])
+                             and not bb.contains(*own[id(q)]))
             if best is None or cost < best[0]:
                 best = (cost, dx, dy, bb)
             if cost == 0:
@@ -146,15 +195,40 @@ def _direct_labels(fig, ax, pts, avoid_line=()):
             taken.append(bb)
 
 
+SUMMARY_PANELS = [  # (metric, panel title, finding) - exact match first: it is the significant result
+    ("exact", "Exact match with the reference SQL", "fine-tuning gain: significant (McNemar p < 0.01)"),
+    ("exec", "SQL returns the correct result when run", "fine-tuning gain: not significant (p ≈ 0.1)"),
+]
+
+
 def summary_chart(pts, base, path):
-    fig, ax = plt.subplots(figsize=(9, 5.4), facecolor=SURFACE)
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.6), facecolor=SURFACE, sharex=True)
+    for ax, (metric, title, finding) in zip(axes, SUMMARY_PANELS):
+        view = [dict(p, acc=p[metric], ci=p[f"{metric}_ci"]) for p in pts]
+        _summary_panel(fig, ax, view, base.get(metric) or [], title, finding)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right", ncol=3, fontsize=8.5, frameon=False, labelcolor=INK2,
+               bbox_to_anchor=(0.995, 0.995))
+    fig.suptitle("Fine-tuned Qwen2.5-0.5B on Jetson Orin Nano 8 GB: accuracy vs speed", color=INK, fontsize=13,
+                 x=0.01, ha="left")
+    fig.text(0.01, 0.01, f"Bars: 95% confidence interval ({pts[0]['n_exact']} questions for exact match, "
+             f"{max(p['n_exec'] for p in pts)} with executable reference SQL for execution). Speed: mean decode "
+             "rate at concurrency 1, same OpenAI-compatible client for both runtimes. Model sizes: table below.\nSignificance: paired "
+             "exact McNemar test of each llama.cpp variant against the untuned base at the same questions "
+             "(report section 7).", fontsize=7.5, color=MUTED, va="bottom")
+    fig.tight_layout(rect=(0, 0.06, 1, 0.97))
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def _summary_panel(fig, ax, pts, base, title, finding):
     ax.set_facecolor(SURFACE)
     xs = [p["speed"] for p in pts]
-    xlo, xhi = min(xs) - 22, max(xs) + 28  # margins for direct labels on either side
+    xlo, xhi = min(xs) - 14, max(xs) + 18  # margins for direct labels on either side
     if base:
         lo, hi = min(base), max(base)
         ax.axhspan(lo - 0.002, hi + 0.002, color=GRID, zorder=0, lw=0)
-        ax.text(xlo + 1, hi + 0.004, f"untuned base model ({lo:.1%}–{hi:.1%})" if hi > lo
+        band_txt = ax.text(xlo + 1, hi + 0.004, f"untuned base model ({lo:.1%}–{hi:.1%})" if hi > lo
                 else f"untuned base model ({lo:.1%})", color=INK2, fontsize=8.5, va="bottom")
     front = pareto(pts)
     ax.plot([p["speed"] for p in front], [p["acc"] for p in front], color=INK2, lw=1.2, ls=(0, (4, 3)),
@@ -168,27 +242,20 @@ def summary_chart(pts, base, path):
         ax.scatter([p["speed"] for p in sel], [p["acc"] for p in sel], s=70, color=col, edgecolors=SURFACE,
                    linewidths=2, zorder=5, label="llama.cpp (GGUF)" if rt == "llama.cpp" else "vLLM (bf16)")
     ax.set_xlim(xlo, xhi)
-    ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.02))
+    span = max(p["acc"] + p["ci"] for p in pts) - min(min(base, default=1), min(p["acc"] - p["ci"] for p in pts))
+    ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.02 if span < 0.25 else 0.05))
     ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=0))
-    _direct_labels(fig, ax, pts, [(p["speed"], p["acc"]) for p in front])
+    _direct_labels(fig, ax, pts, [(p["speed"], p["acc"]) for p in front], [band_txt] if base else [])
     ax.set_xlabel("generation speed, one request at a time (tokens/s)  →  faster", color=INK2)
-    ax.set_ylabel("SQL answers returning the correct result  →  better", color=INK2)
-    ax.set_title("Fine-tuned Qwen2.5-0.5B on Jetson Orin Nano 8 GB: accuracy vs speed",
-                 color=INK, fontsize=12, loc="left", pad=12)
+    ax.set_ylabel("share of test questions  →  better", color=INK2)
+    ax.set_title(f"{title}\n", color=INK, fontsize=11, loc="left", pad=4)
+    ax.text(0, 1.015, finding, transform=ax.transAxes, color=INK2, fontsize=9, va="bottom")
     ax.grid(True, color=GRID, lw=0.6); ax.set_axisbelow(True)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     for s in ("left", "bottom"):
         ax.spines[s].set_color(AXIS)
     ax.tick_params(colors=MUTED, labelcolor=INK2)
-    n = max(p["n"] for p in pts)
-    ax.legend(loc="lower right", fontsize=8, frameon=False, labelcolor=INK2)
-    fig.text(0.01, 0.01, f"Bars: 95% confidence interval on {n} executable test queries.\nSpeed: mean decode "
-             "rate at concurrency 1, same OpenAI-compatible client for both runtimes.",
-             fontsize=7.5, color=MUTED, va="bottom")
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
-    fig.savefig(path, dpi=150, facecolor=SURFACE)
-    plt.close(fig)
 
 
 def main():
@@ -234,13 +301,13 @@ def main():
     pts, base = summary_points(R, sizes)
     if pts:
         summary_chart(pts, base, f"{P}/summary.png")
-        best = {p["label"] for p in pareto(pts)}
         rows = [{"runtime": p["runtime"], "variant": p["label"], "MB": p["mb"], "tok/s": round(p["speed"], 1),
-                 "exec": f"{p['acc']:.1%} ± {p['ci']:.1%}", "best trade-off": "✓" if p["label"] in best else ""}
-                for p in sorted(pts, key=lambda p: -p["acc"])]
+                 "exact": f"{p['exact']:.1%} ± {p['exact_ci']:.1%}", "exec": f"{p['exec']:.1%} ± {p['exec_ci']:.1%}"}
+                for p in sorted(pts, key=lambda p: -p["speed"])]
         summary = ["\n## Summary: accuracy vs speed\n", "![accuracy vs speed](plots/summary.png)\n",
                    table(rows, ["runtime", "variant", "MB", ("decode tok/s (1 req)", "tok/s"),
-                                ("exec match (95% CI)", "exec"), "best trade-off"])]
+                                ("exact match (95% CI)", "exact"), ("exec match (95% CI)", "exec")]),
+                   "Differences between variants are within the 95% intervals; see section 7 for paired tests.\n"]
         md[head:head] = summary  # top of the report, right after the device line
         md.append("\n## 2. Exported model sizes\n")
         md.append(table([{"file": k, "MB": v} for k, v in sizes.items()], ["file", "MB"]))
@@ -320,6 +387,19 @@ def main():
     ev.sort(key=lambda r: (r["runtime"], r["variant"]))
     md.append(table(ev, ["runtime", "variant", ("exec match", "exec_match"), ("exact match", "exact_match"),
                          ("token F1", "token_f1"), ("n", "n"), ("exec scored", "exec_scored"), "errors"]))
+
+    # ---- paired significance ----
+    lc = [e for e in ev if e["runtime"] == "llama.cpp"]
+    cols = ["variant", "metric", "n", "ref %", "variant %", "only variant right", "only ref right", "p", "verdict"]
+    ft_vs_base = [r for r in paired_rows(lc, "base-F16 (no fine-tune)") if "no fine-tune" not in r["variant"]]
+    quant_vs_f16 = [r for r in paired_rows(lc, "ft-F16") if r["variant"].startswith("ft-")]
+    if ft_vs_base or quant_vs_f16:
+        md.append("\n## 7. Is the difference real? (paired exact McNemar test, llama.cpp)\n")
+        md.append("Both models answer the same questions; the test only looks at questions exactly one of them got "
+                  "right. p < 0.05 means that imbalance is unlikely to be chance. Exec match is scored only on "
+                  "questions whose reference SQL runs in SQLite.\n")
+        md.append(table(ft_vs_base, cols, "Fine-tuned vs untuned base (both F16 unless named): did fine-tuning help?"))
+        md.append(table(quant_vs_f16, cols, "Quantised vs fine-tuned F16: did quantisation cost accuracy?"))
 
     with open(os.path.join(a.results, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))

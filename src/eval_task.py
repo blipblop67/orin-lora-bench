@@ -93,7 +93,11 @@ def run_eval(base_url, model, preset="sql", n=200, concurrency=4) -> dict:
     if preset == "sql":
         ex_scored = [r["exec"] for r in ok if r["exec"] is not None]
         out.update(exact_match=round(sum(r["exact"] for r in ok) / max(1, len(ok)), 4),
-                   exec_match=round(sum(ex_scored) / max(1, len(ex_scored)), 4), exec_scored=len(ex_scored))
+                   exec_match=round(sum(ex_scored) / max(1, len(ex_scored)), 4), exec_scored=len(ex_scored),
+                   # Per-question outcomes in dataset order (None = request error / reference not executable),
+                   # so two variants can be compared on the same questions with a paired test (McNemar).
+                   per_item={"exact": [None if "error" in r else int(r["exact"]) for r in res],
+                             "exec": [None if "error" in r or r["exec"] is None else int(r["exec"]) for r in res]})
     else:
         out["token_f1"] = round(sum(r["f1"] for r in ok) / max(1, len(ok)), 4)
     return out
